@@ -14,7 +14,6 @@ def _init():
 
 
 def setup(judul: str):
-    st.set_page_config(page_title=judul, layout="wide")
     try:
         _init()
     except Exception as e:
@@ -23,35 +22,13 @@ def setup(judul: str):
     st.title(judul)
 
 
-def load(filter_sidebar: bool = True):
+def load():
     df = db.read_all()
     if df.empty:
         st.info("Belum ada data. Tambahkan lewat halaman Kelola Data, atau isi data contoh.")
         if st.button("Isi 150 data contoh"):
             db.seed_sample(150)
             st.rerun()
-        st.stop()
-    if not filter_sidebar:
-        return df
-    total = len(df)
-    with st.sidebar:
-        st.header("Filter")
-        tmin, tmax = df["tanggal_skrining"].min().date(), df["tanggal_skrining"].max().date()
-        per = st.date_input("Periode skrining", (tmin, tmax), min_value=tmin, max_value=tmax)
-        usia = st.multiselect("Kelompok usia", [u for u in URUT_USIA if u in set(df["kelompok_usia"])])
-        jk = st.multiselect("Jenis kelamin", sorted(df["jenis_kelamin"].unique()))
-        ptg = st.multiselect("Petugas", sorted(df["petugas_skrining"].unique()))
-    if isinstance(per, (tuple, list)) and len(per) == 2:
-        df = df[(df["tanggal_skrining"].dt.date >= per[0]) & (df["tanggal_skrining"].dt.date <= per[1])]
-    if usia:
-        df = df[df["kelompok_usia"].isin(usia)]
-    if jk:
-        df = df[df["jenis_kelamin"].isin(jk)]
-    if ptg:
-        df = df[df["petugas_skrining"].isin(ptg)]
-    st.sidebar.caption(f"{len(df)} dari {total} data")
-    if df.empty:
-        st.warning("Tidak ada data sesuai filter.")
         st.stop()
     return df
 

@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 from urllib.parse import quote_plus
 
@@ -153,12 +154,49 @@ def delete(id_anak: str):
 
 
 # ---------------- Impor massal ----------------
+def prepare_import_df(df: pd.DataFrame):
+    """Normalize CSV headers and fill absent optional input columns."""
+    aliases = {}
+    for f in FIELDS:
+        for name in (f.name, f.label):
+            key = re.sub(r"[^a-z0-9]", "", name.lower())
+            aliases[key] = f.name
+
+    rename = {}
+    recognized = set()
+    duplicate_fields = set()
+    unknown = []
+    for column in df.columns:
+        key = re.sub(r"[^a-z0-9]", "", str(column).lstrip("\ufeff").strip().lower())
+        field = aliases.get(key)
+        if field is None:
+            unknown.append(str(column))
+            continue
+        if field in recognized:
+            duplicate_fields.add(field)
+        recognized.add(field)
+        rename[column] = field
+
+    df = df.rename(columns=rename).copy()
+    missing_optional = [f.name for f in FIELDS if not f.req and f.name not in df.columns]
+    for name in missing_optional:
+        df[name] = pd.NA
+
+    errors = []
+    if duplicate_fields:
+        errors.append("Kolom CSV duplikat setelah penyesuaian: " + ", ".join(sorted(duplicate_fields)))
+    return df, missing_optional, unknown, errors
+
+
 def validate_df(df: pd.DataFrame):
     """Return (df_bersih, daftar_error)."""
-    errs = []
+    df, _, _, errs = prepare_import_df(df)
+    if errs:
+        return df, errs
     miss = [f.name for f in FIELDS if f.req and f.name not in df.columns]
     if miss:
-        return df, [f"Kolom wajib tidak ada: {', '.join(miss)}"]
+        errs.append(f"Kolom wajib tidak ada: {', '.join(miss)}")
+        return df, errs
     df = df.reindex(columns=NAMES).copy()
     df["tanggal_skrining"] = pd.to_datetime(df["tanggal_skrining"], errors="coerce").dt.date
     for f in FIELDS:

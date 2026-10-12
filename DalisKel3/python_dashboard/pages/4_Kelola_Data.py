@@ -83,10 +83,40 @@ elif mode == "Impor / Ekspor":
         st.rerun()
     up = st.file_uploader("Impor CSV (kolom sesuai template)", type="csv")
     if up is not None:
-        new = pd.read_csv(up)
+        try:
+            uploaded = pd.read_csv(up, encoding="utf-8-sig", sep=None, engine="python")
+        except (UnicodeDecodeError, pd.errors.ParserError) as e:
+            st.error(f"CSV tidak dapat dibaca. Periksa encoding dan pemisah kolom file. Detail: {e}")
+            st.stop()
+
+        new, kolom_opsional, kolom_tidak_dikenal, konversi_errs = db.prepare_import_df(uploaded)
+        if kolom_opsional:
+            st.info(
+                f"Kolom opsional yang tidak ada akan ditambahkan sebagai nilai kosong "
+                f"({len(kolom_opsional)} kolom)."
+            )
+        if kolom_tidak_dikenal:
+            st.warning(
+                "Kolom yang tidak dikenali dan tidak akan diimpor: "
+                + ", ".join(kolom_tidak_dikenal)
+            )
+        for e in konversi_errs:
+            st.error(e)
+
         st.dataframe(new.head(10), hide_index=True)
-        if st.button("Validasi & impor", type="primary"):
-            n, errs = db.import_df(new)
+        missing_required = [f.name for f in FIELDS if f.req and f.name not in new.columns]
+        if missing_required:
+            st.error(
+                "Format CSV tidak cocok: kolom wajib berikut belum ditemukan: "
+                + ", ".join(missing_required)
+                + ". Gunakan template CSV atau samakan nama header dengan nama/label kolom pada template."
+            )
+        if st.button(
+            "Impor data hasil penyesuaian",
+            type="primary",
+            disabled=bool(missing_required or konversi_errs),
+        ):
+            n, errs = db.import_df(uploaded)
             if errs:
                 for e in errs:
                     st.error(e)

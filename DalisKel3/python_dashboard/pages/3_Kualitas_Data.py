@@ -1,48 +1,116 @@
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
+import database as db
 import utils as u
-from schema import NAMES, GADGET_COND
+from schema import FIELDS
 
-u.setup("Kualitas Data & Beban Petugas")
-df = u.load()
+u.setup("Kualitas Data")
+df = db.read_all()
 
-m = df.kelengkapan_data
-a, b, c = st.columns(3)
-a.metric("Rata-rata kelengkapan", f"{m.mean():.1f}%")
-b.metric("Data lengkap 100%", f"{(m >= 100).mean() * 100:.1f}%")
-c.metric("Data < 80% lengkap", int((m < 80).sum()))
+if df.empty:
+    st.info("Belum ada data untuk diperiksa. Tambahkan data melalui halaman Kelola Data.")
+    st.stop()
 
-a, b = st.columns(2)
-a.plotly_chart(px.histogram(df, x="kelengkapan_data", nbins=20, title="Distribusi kelengkapan data (%)"))
-inp = [n for n in NAMES if n not in GADGET_COND]
-ms = (df[inp].isna().mean() * 100).sort_values().reset_index()
-ms.columns = ["kolom", "persen_kosong"]
-b.plotly_chart(px.bar(ms[ms.persen_kosong > 0].tail(20), x="persen_kosong", y="kolom", orientation="h",
-                      title="Persentase nilai kosong per kolom"))
+st.write("Pilih kolom dan pemeriksaan. Hasil diperbarui otomatis mengikuti pilihan Anda.")
+field_by_name = {field.name: field for field in FIELDS}
 
-st.subheader("Beban & pola per petugas")
-p = df.groupby("petugas_skrining").agg(
-    jumlah=("id_anak", "count"), rata_skor=("skor_kpsp", "mean"),
-    pct_berisiko=("kpsp_biner", lambda s: (s == "Berisiko").mean() * 100),
-    kelengkapan=("kelengkapan_data", "mean")).round(1).reset_index()
-a, b = st.columns(2)
-a.dataframe(p, hide_index=True)
-b.plotly_chart(px.box(df, x="petugas_skrining", y="skor_kpsp", title="Sebaran skor KPSP per petugas"))
-st.caption("Perbedaan pola skor antar petugas yang mencolok dapat menandakan perbedaan cara penilaian (bukan perbedaan anak).")
+kolom = st.selectbox(
+    "Kolom yang diperiksa",
+    list(field_by_name),
+    format_func=lambda name: field_by_name[name].label,
+)
+pemeriksaan = st.multiselect(
+    "Pemeriksaan",
+    ["Kelengkapan", "Validitas nilai", "Ringkasan nilai"],
+    default=["Kelengkapan", "Validitas nilai"],
+)
 
-st.subheader("Pemeriksaan konsistensi")
-cek = {
-    "Tidur + interaksi + gadget > 24 jam": (df.durasi_tidur_jam + (df.durasi_interaksi_menit + df.durasi_gadget_menit) / 60) > 24,
-    "Prematur (<37 mgg) tetapi berat lahir > 4000 g": (df.usia_kehamilan_minggu < 37) & (df.berat_lahir_gram > 4000),
-    "Usia < 3 bulan (form KPSP tidak tersedia)": df.form_kpsp == "Di bawah 3 bln",
-    "Tanggal skrining di masa depan": df.tanggal_skrining > pd.Timestamp.today().normalize(),
-    "Durasi pengasuhan + tidur > 24 jam": (df.durasi_pengasuhan_jam + df.durasi_tidur_jam) > 24,
-}
-ring = pd.DataFrame({"Aturan": list(cek), "Jumlah baris": [int(v.fillna(False).sum()) for v in cek.values()]})
-st.dataframe(ring, hide_index=True)
-pilih = st.selectbox("Lihat baris yang bermasalah", ["(tidak ada)"] + list(cek))
-if pilih != "(tidak ada)":
-    st.dataframe(df[cek[pilih].fillna(False)][["id_anak", "tanggal_skrining", "usia_anak_bulan", "petugas_skrining"]],
-                 hide_index=True)
+field = field_by_name[kolom]
+values = df[kolom]
+validity = pd.Series(False, index=df.index)
+
+if field.kind == "cat":
+    validity = values.notna() & ~values.isin(field.opts or [])
+elif field.kind in ("int", "float"):
+    numeric = pd.to_numeric(values, errors="coerce")
+    validity = values.notna() & (
+        numeric.isna()
+        | (numeric < field.lo)
+        | (numeric > field.hi)
+    )
+    if field.kind == "int":
+        validity |= values.notna() & numeric.notna() & (numeric % 1 != 0)
+elif field.kind == "date":
+    parsed = pd.to_datetime(values, errors="coerce")
+    validity = values.notna() & parsed.isna()
+elif field.kind == "text":
+    validity = values.astype("string").str.len().gt(100).fillna(False)
+
+missing = values.isna()
+summary = []
+if "Kelengkapan" in pemeriksaan:
+    summary.append({
+        "Pemeriksaan": "Nilai kosong",
+        "Jumlah": int(missing.sum()),
+        "Persentase": f"{missing.mean() * 100:.1f}%",
+        "Hasil": "Perlu ditinjau" if missing.any() else "Lulus",
+    })
+if "Validitas nilai" in pemeriksaan:
+    summary.append({
+        "Pemeriksaan": "Nilai tidak valid",
+        "Jumlah": int(validity.sum()),
+        "Persentase": f"{validity.mean() * 100:.1f}%",
+        "Hasil": "Perlu ditinjau" if validity.any() else "Lulus",
+    })
+if "Ringkasan nilai" in pemeriksaan:
+    non_null = values.dropna()
+    summary.append({
+        "Pemeriksaan": "Nilai unik",
+        "Jumlah": int(non_null.nunique()),
+        "Persentase": "-",
+        "Hasil": f"{len(non_null)} nilai terisi",
+    })
+
+st.subheader(f"Hasil pemeriksaan: {field.label}")
+if summary:
+    st.dataframe(pd.DataFrame(summary), hide_index=True, use_container_width=True)
+else:
+    st.info("Pilih minimal satu jenis pemeriksaan.")
+
+if "Ringkasan nilai" in pemeriksaan and values.notna().any():
+    if field.kind in ("int", "float"):
+        numeric = pd.to_numeric(values, errors="coerce").dropna()
+        a, b, c = st.columns(3)
+        a.metric("Minimum", f"{numeric.min():g}")
+        b.metric("Median", f"{numeric.median():g}")
+        c.metric("Maksimum", f"{numeric.max():g}")
+    else:
+        st.write("Nilai paling sering muncul")
+        counts = values.fillna("(kosong)").value_counts().head(10).rename_axis("Nilai").reset_index(name="Jumlah")
+        st.dataframe(counts, hide_index=True, use_container_width=True)
+
+if "Kelengkapan" in pemeriksaan or "Validitas nilai" in pemeriksaan:
+    issue_mask = pd.Series(False, index=df.index)
+    if "Kelengkapan" in pemeriksaan:
+        issue_mask |= missing
+    if "Validitas nilai" in pemeriksaan:
+        issue_mask |= validity
+
+    if st.checkbox("Tampilkan baris yang perlu ditinjau"):
+        if issue_mask.any():
+            id_columns = [name for name in ("id_anak", "tanggal_skrining") if name in df.columns and name != kolom]
+            details = df.loc[issue_mask, id_columns].copy()
+            details[field.label] = values.loc[issue_mask]
+            details["Masalah"] = [
+                ", ".join(
+                    label for label, mask in (
+                        ("kosong", missing if "Kelengkapan" in pemeriksaan else None),
+                        ("tidak valid", validity if "Validitas nilai" in pemeriksaan else None),
+                    ) if mask is not None and mask.loc[index]
+                )
+                for index in details.index
+            ]
+            st.dataframe(details, hide_index=True, use_container_width=True)
+        else:
+            st.success("Tidak ada baris yang perlu ditinjau untuk pemeriksaan ini.")
